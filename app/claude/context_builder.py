@@ -117,7 +117,6 @@ def append_to_conversation(db: Session, user: User, role: str, content: str) -> 
     new_msg = {"role": role, "content": content, "ts": ts}
 
     if not ctx:
-        from app.models.conversation_context import ConversationContext
         ctx = ConversationContext(user_id=user.id, messages=[new_msg])
         db.add(ctx)
     else:
