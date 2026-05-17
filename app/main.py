@@ -1,4 +1,7 @@
 import os
+import asyncio
+import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +16,63 @@ from app.routers import (
     api_dashboard,
 )
 
-app = FastAPI(title="Fitness Bot API", docs_url="/docs")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start background scheduler when app starts."""
+    scheduler_task = asyncio.create_task(_run_scheduler())
+    yield
+    scheduler_task.cancel()
+
+
+async def _run_scheduler():
+    """
+    Lightweight in-process scheduler — replaces Celery for free-tier hosting.
+    Checks every minute whether a scheduled task should fire.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.config import settings
+
+    tz = ZoneInfo(settings.user_timezone)
+    last_daily = None
+    last_weekly_plan = None
+    last_weekly_review = None
+
+    while True:
+        try:
+            await asyncio.sleep(60)
+            now = datetime.now(tz)
+            today_key = now.strftime("%Y-%m-%d")
+
+            # Daily summary — 20:00 every day
+            if now.hour == 20 and now.minute == 0 and last_daily != today_key:
+                last_daily = today_key
+                from app.tasks.daily_summary import send_daily_summary
+                await asyncio.to_thread(send_daily_summary)
+
+            # Weekly plan prompt — Monday 07:00
+            week_key = now.strftime("%Y-W%W")
+            if now.weekday() == 0 and now.hour == 7 and now.minute == 0 and last_weekly_plan != week_key:
+                last_weekly_plan = week_key
+                from app.tasks.weekly_plan import prompt_weekly_plan
+                await asyncio.to_thread(prompt_weekly_plan)
+
+            # Weekly review — Sunday 20:00
+            if now.weekday() == 6 and now.hour == 20 and now.minute == 0 and last_weekly_review != week_key:
+                last_weekly_review = week_key
+                from app.tasks.weekly_review import send_weekly_review
+                await asyncio.to_thread(send_weekly_review)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Scheduler error: {e}")
+
+
+app = FastAPI(title="Fitness Bot API", docs_url="/docs", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,6 +116,12 @@ def admin_setup(name: str = Query(default="")):
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.get("/ping")
+def ping():
+    """Keep-alive endpoint — pinged every 10 min by cron-job.org to prevent sleep."""
+    return "pong"
 
 
 # Serve React dashboard static files from /dashboard/dist

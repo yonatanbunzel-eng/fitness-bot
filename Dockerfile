@@ -1,8 +1,6 @@
 FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -11,6 +9,5 @@ RUN pip install --no-cache-dir -e .
 
 COPY . .
 
-RUN alembic upgrade head || true
-
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run migrations then start the server
+CMD alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
