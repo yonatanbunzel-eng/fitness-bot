@@ -1,4 +1,5 @@
-const API_KEY = import.meta.env.VITE_API_KEY || ''
+const params_url = new URLSearchParams(window.location.search)
+const API_KEY = params_url.get('api_key') || import.meta.env.VITE_API_KEY || ''
 const BASE = import.meta.env.VITE_API_BASE || ''
 
 async function get<T>(path: string, params?: Record<string, string>): Promise<T> {
