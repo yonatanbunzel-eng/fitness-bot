@@ -24,13 +24,13 @@ async def strava_callback(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    token_data = await strava_service.exchange_code(code)
-    strava_service.save_token(db, user, token_data)
-
-    # Subscribe to Strava webhooks
-    await _subscribe_strava_webhook()
-
-    return {"status": "Strava connected!", "athlete": token_data.get("athlete", {}).get("firstname")}
+    try:
+        token_data = await strava_service.exchange_code(code)
+        strava_service.save_token(db, user, token_data)
+        await _subscribe_strava_webhook()
+        return {"status": "Strava connected!", "athlete": token_data.get("athlete", {}).get("firstname")}
+    except Exception as e:
+        return {"error": str(e), "type": type(e).__name__}
 
 
 async def _subscribe_strava_webhook():
