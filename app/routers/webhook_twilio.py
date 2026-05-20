@@ -4,6 +4,7 @@ Receives all incoming WhatsApp messages from Twilio.
 Detects message type (text / image / audio) and routes accordingly.
 """
 import asyncio
+import logging
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
@@ -14,17 +15,23 @@ from app.models.user import User
 from app.services import claude_processor, whisper_service, photo_service, twilio_service
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
-async def _process_voice(from_number: str, media_url: str):
+async def _process_voice(from_number: str, media_url: str, media_type: str):
     """Process voice message in background to avoid Twilio 15s timeout."""
+    logger.info(f"[VOICE] Starting background processing for {from_number}, media_type={media_type}")
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.whatsapp_number == from_number).first()
         if not user:
+            logger.warning(f"[VOICE] User not found: {from_number}")
             return
+        logger.info(f"[VOICE] Downloading media from {media_url[:50]}...")
         media_bytes = await twilio_service.download_media(media_url)
+        logger.info(f"[VOICE] Downloaded {len(media_bytes)} bytes, transcribing...")
         transcript = await asyncio.to_thread(whisper_service.transcribe_audio, media_bytes)
+        logger.info(f"[VOICE] Transcript: {transcript[:100]}")
         reply = await asyncio.to_thread(
             claude_processor.process_message,
             db=db,
@@ -33,9 +40,10 @@ async def _process_voice(from_number: str, media_url: str):
         )
         if reply:
             twilio_service.send_message(from_number, reply)
+            logger.info(f"[VOICE] Reply sent successfully")
     except Exception:
         import traceback
-        traceback.print_exc()
+        logger.error(f"[VOICE] Error processing voice message:\n{traceback.format_exc()}")
         twilio_service.send_message(from_number, "לא הצלחתי לעבד את ההקלטה. נסה שוב 🎤")
     finally:
         db.close()
@@ -66,7 +74,8 @@ async def twilio_webhook(
 
             if "audio" in media_type:
                 # Voice message → process in background (avoids Twilio 15s timeout)
-                background_tasks.add_task(_process_voice, From, MediaUrl0)
+                logger.info(f"[WEBHOOK] Audio message received, media_type={media_type}, scheduling background task")
+                background_tasks.add_task(_process_voice, From, MediaUrl0, media_type)
                 return PlainTextResponse("")  # Return immediately
 
             media_bytes = await twilio_service.download_media(MediaUrl0)
