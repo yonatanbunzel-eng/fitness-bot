@@ -3,11 +3,12 @@ POST /webhook/twilio
 Receives all incoming WhatsApp messages from Twilio.
 Detects message type (text / image / audio) and routes accordingly.
 """
-from fastapi import APIRouter, Depends, Form, Request
+import asyncio
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import get_db, SessionLocal
 from app.dependencies import get_current_user
 from app.models.user import User
 from app.services import claude_processor, whisper_service, photo_service, twilio_service
@@ -15,9 +16,35 @@ from app.services import claude_processor, whisper_service, photo_service, twili
 router = APIRouter()
 
 
+async def _process_voice(from_number: str, media_url: str):
+    """Process voice message in background to avoid Twilio 15s timeout."""
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.whatsapp_number == from_number).first()
+        if not user:
+            return
+        media_bytes = await twilio_service.download_media(media_url)
+        transcript = await asyncio.to_thread(whisper_service.transcribe_audio, media_bytes)
+        reply = await asyncio.to_thread(
+            claude_processor.process_message,
+            db=db,
+            user=user,
+            text=f"[Voice message transcript]: {transcript}",
+        )
+        if reply:
+            twilio_service.send_message(from_number, reply)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        twilio_service.send_message(from_number, "לא הצלחתי לעבד את ההקלטה. נסה שוב 🎤")
+    finally:
+        db.close()
+
+
 @router.post("/webhook/twilio", response_class=PlainTextResponse)
 async def twilio_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     From: str = Form(default=""),
     Body: str = Form(default=""),
     NumMedia: str = Form(default="0"),
@@ -36,18 +63,15 @@ async def twilio_webhook(
 
         if num_media > 0 and MediaUrl0:
             media_type = MediaContentType0.lower()
-            media_bytes = await twilio_service.download_media(MediaUrl0)
 
             if "audio" in media_type:
-                # Voice message → transcribe → process as text with workout context
-                transcript = whisper_service.transcribe_audio(media_bytes)
-                reply = claude_processor.process_message(
-                    db=db,
-                    user=user,
-                    text=f"[Voice message transcript]: {transcript}",
-                )
+                # Voice message → process in background (avoids Twilio 15s timeout)
+                background_tasks.add_task(_process_voice, From, MediaUrl0)
+                return PlainTextResponse("")  # Return immediately
 
-            elif "image" in media_type:
+            media_bytes = await twilio_service.download_media(MediaUrl0)
+
+            if "image" in media_type:
                 # Photo → check if food or progress photo
                 caption = Body.strip() if Body.strip() else None
                 category = photo_service.detect_photo_category(caption)
